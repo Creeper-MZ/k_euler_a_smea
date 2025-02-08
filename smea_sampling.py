@@ -52,7 +52,7 @@ def append_dims(x, target_dims):
 
 def to_d(x, sigma, denoised):
     """Converts a denoiser output to a Karras ODE derivative."""
-    return (x - denoised) / append_dims(sigma, x.ndim)
+    return (x - denoised) / append_dims(sigma, x.ndim).to(x.device)
 
 def default_mid_func(i, sigma_i, sigma_down, n_steps):
     progress = i / float(n_steps - 1) if (n_steps > 1) else 0
@@ -76,7 +76,7 @@ def sample_euler_a_smea(
     if noise_sampler is None:
         noise_sampler = default_noise_sampler(x)
 
-    s_in = x.new_ones([x.shape[0]])
+    s_in = x.new_ones([x.shape[0]],device=x.device)
     n_steps = len(sigmas) - 1
 
 
@@ -91,29 +91,29 @@ def sample_euler_a_smea(
         sigma_down, sigma_up = get_ancestral_step(sigma_i, sigma_next, eta=eta)
 
         # 1) 计算中间sigma
-        sigma_mid = mid_func(i, sigma_i, sigma_down, n_steps)
+        sigma_mid = torch.tensor(mid_func(i, sigma_i, sigma_down, n_steps), dtype=x.dtype, device=x.device)
         if sigma_down < sigma_i:
-            sigma_mid = max(min(sigma_mid, sigma_i), sigma_down)
+            sigma_mid = torch.max(torch.min(sigma_mid, sigma_i), sigma_down).to(x.device)
         else:
-            sigma_mid = min(max(sigma_mid, sigma_i), sigma_down)
+            sigma_mid = torch.min(torch.max(sigma_mid, sigma_i), sigma_down).to(x.device)
 
         # 子步 A: from sigma_i -> sigma_mid
         factor = 1
         if i<(n_steps-n_steps/2):
-            factor = math.sin((i/(n_steps-n_steps/2))*(math.pi/2)) * 0.4 + 0.8
+            factor = math.sin((i/(n_steps-n_steps/2))*(math.pi/2)) * 0.4 + 0.7
             print(factor)
-        x_s = F.interpolate(x, scale_factor=factor, mode='nearest')
-        denoised_a = model(x_s, sigma_i*s_in, **extra_args)  # U-Net预测
-        denoised_a = F.interpolate(denoised_a, size=x.shape[2:], mode='nearest')
-        d_a = to_d(x, sigma_i, denoised_a)
+        x_s = F.interpolate(x, scale_factor=factor, mode='nearest-exact').to(x.device)
+        denoised_a = model(x_s, sigma_i*s_in, **extra_args).to(x.device)  # U-Net预测
+        denoised_a = F.interpolate(denoised_a, size=x.shape[2:], mode='nearest').to(x.device)
+        d_a = to_d(x, sigma_i, denoised_a).to(x.device)
         # 计算子步更新:
         dt_a = sigma_mid - sigma_i
         x = x + d_a * dt_a
-        #gamma = min(sigma_mid, eta * (sigma_mid ** 2 * (sigma_i ** 2 - sigma_mid ** 2) / sigma_i ** 2) ** 0.5)
+        #gamma = torch.min(sigma_mid, eta * (sigma_mid ** 2 * (sigma_i ** 2 - sigma_mid ** 2) / sigma_i ** 2) ** 0.5)
         # 子步 B: from sigma_mid -> sigma_down
-        denoised_b = model(x, sigma_mid*s_in, **extra_args)
+        denoised_b = model(x, sigma_mid*s_in, **extra_args).to(x.device)
 
-        d_b = to_d(x, sigma_mid, denoised_b)
+        d_b = to_d(x, sigma_mid, denoised_b).to(x.device)
 
         dt_b = sigma_down - sigma_mid
         x = x + d_b * dt_b
@@ -121,7 +121,8 @@ def sample_euler_a_smea(
         #加 euler a 的祖先噪声
         if sigma_next > 0:
             x = x + noise_sampler(sigma_i, sigma_next)*s_noise*sigma_up
-
+        else:
+            x = denoised_b
         if callback is not None:
             callback({
                 'x': x,
