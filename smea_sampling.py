@@ -101,7 +101,7 @@ def sample_euler_a_smea(
         factor = 1
         if i<(n_steps-n_steps/2):
             factor = math.sin((i/(n_steps-n_steps/2))*(math.pi/2)) * 0.4 + 0.7
-            print(factor)
+            #print(factor)
         x_s = F.interpolate(x, scale_factor=factor, mode='nearest-exact').to(x.device)
         denoised_a = model(x_s, sigma_i*s_in, **extra_args).to(x.device)  # U-Net预测
         denoised_a = F.interpolate(denoised_a, size=x.shape[2:], mode='nearest').to(x.device)
