@@ -7,7 +7,6 @@ import torch.nn.functional as F
 sampling = None
 BACKEND = None
 INITIALIZED = False
-
 if not BACKEND:
     try:
         _ = import_module("modules.sd_samplers_kdiffusion")
@@ -22,8 +21,6 @@ if not BACKEND:
         BACKEND = "ComfyUI"
     except ImportError as _:
         pass
-
-
 def default_noise_sampler(x):
     return lambda sigma, sigma_next: torch.randn_like(x)
 
@@ -79,7 +76,7 @@ def sample_euler_a_smea(
     s_in = x.new_ones([x.shape[0]],device=x.device)
     n_steps = len(sigmas) - 1
 
-
+    #print(extra_args,eta,s_noise)
 
     if mid_func is None:
         mid_func = default_mid_func
@@ -102,27 +99,27 @@ def sample_euler_a_smea(
         if i<(n_steps-n_steps/2):
             factor = math.sin((i/(n_steps-n_steps/2))*(math.pi/2)) * 0.4 + 0.7
             #print(factor)
-        x_s = F.interpolate(x, scale_factor=factor, mode='nearest-exact').to(x.device)
+        x_s = F.interpolate(x, scale_factor=factor, mode='nearest').to(x.device)
         denoised_a = model(x_s, sigma_i*s_in, **extra_args).to(x.device)  # U-Net预测
         denoised_a = F.interpolate(denoised_a, size=x.shape[2:], mode='nearest').to(x.device)
         d_a = to_d(x, sigma_i, denoised_a).to(x.device)
         # 计算子步更新:
         dt_a = sigma_mid - sigma_i
         x = x + d_a * dt_a
-        #gamma = torch.min(sigma_mid, eta * (sigma_mid ** 2 * (sigma_i ** 2 - sigma_mid ** 2) / sigma_i ** 2) ** 0.5)
+        gamma = torch.min(sigma_mid, eta * (sigma_mid ** 2 * (sigma_i ** 2 - sigma_mid ** 2) / sigma_i ** 2) ** 0.5)
+        x = x + noise_sampler(sigma_i,sigma_mid)*s_noise*gamma*((1.1-factor)/2)
         # 子步 B: from sigma_mid -> sigma_down
-        denoised_b = model(x, sigma_mid*s_in, **extra_args).to(x.device)
-
-        d_b = to_d(x, sigma_mid, denoised_b).to(x.device)
-
         dt_b = sigma_down - sigma_mid
+        denoised_b = model(x, sigma_mid*s_in, **extra_args).to(x.device)
+        d_b = to_d(x, sigma_mid, denoised_b).to(x.device)
         x = x + d_b * dt_b
+        #print(sigma_i,sigma_mid,sigma_next)
+
+
 
         #加 euler a 的祖先噪声
         if sigma_next > 0:
             x = x + noise_sampler(sigma_i, sigma_next)*s_noise*sigma_up
-        else:
-            x = denoised_b
         if callback is not None:
             callback({
                 'x': x,
