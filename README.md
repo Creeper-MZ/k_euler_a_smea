@@ -1,4 +1,4 @@
-# k_euler_a_smea - Only can work on comfyUI!!!
+# k_euler_a_smea - ComfyUI Only!!!
 A sampler based on Euler_a that applies a sinusoidal schedule for multiple passes.
 
 采样器代码基于k_diffusion库中的euler a，因为对comfyui的插件开发了解较少，所以为了可以兼容comfyui，使用了 https://github.com/Koishi-Star/Euler-Smea-Dyn-Sampler 中的部分代码来提供对comfyui的兼容。此采样器在群友的帮助下完成。
