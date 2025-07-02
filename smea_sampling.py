@@ -3,7 +3,7 @@ from tqdm.auto import trange
 import torch
 import math
 import torch.nn.functional as F
-
+from torchvision.transforms.functional import gaussian_blur
 sampling = None
 BACKEND = None
 INITIALIZED = False
@@ -132,7 +132,7 @@ def dy_sampling_step(x, model, dt, sigma_hat, **extra_args):
         x = x_expanded
 
     return x,denoised
-@torch.no_grad()
+'''@torch.no_grad()
 def sample_euler_a_smea(
     model,
     x,
@@ -209,4 +209,143 @@ def sample_euler_a_smea(
                 'denoised': denoised_b
             })
 
+    return x'''
+
+
+@torch.no_grad()
+def sample_euler_a_smea(model, x, sigmas, extra_args=None, callback=None,
+                        disable=False, eta=1., s_noise=1., noise_sampler=None):
+    """
+    SMEA采样器的正确实现
+    """
+    if extra_args is None:
+        extra_args = {}
+    if noise_sampler is None:
+        noise_sampler = default_noise_sampler(x)
+
+    n_steps = len(sigmas) - 1
+
+    # 判断是否需要启用SMEA（高分辨率时自动启用）
+    enable_smea = x.shape[2] >= 128 or x.shape[3] >= 128  # 对应实际分辨率≥1024
+
+    for i in trange(n_steps, disable=disable):
+        sigma_i = sigmas[i]
+        sigma_next = sigmas[i + 1]
+
+        if enable_smea and i < n_steps * 0.8:  # 在前80%的步骤启用SMEA
+            # SMEA多通道处理
+            x,denoised = smea_step(x, model, sigma_i, sigma_next, eta, extra_args,
+                          noise_sampler, s_noise, i, n_steps)
+        else:
+            # 标准Euler Ancestral步骤
+            x,denoised = euler_ancestral_step(x, model, sigma_i, sigma_next, eta,
+                                     extra_args, noise_sampler, s_noise)
+
+        if callback is not None:
+            callback({
+                'x': x,
+                'i': i,
+                'sigma': sigmas[i],
+                'sigma_hat': sigmas[i],
+                'denoised': denoised  # 添加这一行
+            })
+
     return x
+
+def create_detail_channel(x):
+    """通过增强高频分量来创建细节通道"""
+    # 使用高斯模糊获取低频分量
+    low_freq = gaussian_blur(x, kernel_size=[5,5])
+    # 计算高频细节
+    high_freq = x - low_freq
+    # 增强高频细节
+    detail_enhanced = x + 0.5 * high_freq
+    return detail_enhanced
+def smea_step(x, model, sigma_i, sigma_next, eta, extra_args,
+              noise_sampler, s_noise, step, total_steps):
+    """
+    SMEA的核心多通道处理步骤
+    """
+    # 计算进度和正弦权重
+    progress = step / float(total_steps - 1)
+    sine_weight = math.sin(progress * math.pi * 0.5) ** 2
+
+    # 多通道评估
+    n_passes = 3
+    denoised_results = []
+
+    for pass_idx in range(n_passes):
+        # 为每个通道准备不同的输入
+        if pass_idx == 0:
+            # 主通道：原始分辨率
+            x_input = x
+            scale_factor = 1.0
+        elif pass_idx == 1:
+            # 全局通道：降低分辨率以捕获全局特征
+            scale_factor = 0.5
+            x_input = F.interpolate(x, scale_factor=scale_factor,
+                                    mode='bilinear', align_corners=False)
+        else:
+            # 细节通道
+            scale_factor = 1
+            x_input = create_detail_channel(x)
+
+        # UNet评估
+        denoised = model(x_input, sigma_i * x_input.new_ones([x_input.shape[0]]),
+                         **extra_args)
+
+        # 如果缩放了，恢复到原始尺寸
+        if scale_factor != 1.0:
+            denoised = F.interpolate(denoised, size=x.shape[2:],
+                                     mode='bilinear', align_corners=False)
+
+        denoised_results.append(denoised)
+
+    # 使用正弦权重组合多个结果
+    if n_passes == 3:
+        # 组合权重可以根据进度动态调整
+        w1 = 0.55 + 0.3 * sine_weight  # 主通道权重
+        w2 = 0.3 - 0.2 * sine_weight  # 全局通道权重
+        w3 = 0.15 - 0.1 * sine_weight  # 细节通道权重
+
+        # 归一化权重
+        w_sum = w1 + w2 + w3
+        w1, w2, w3 = w1 / w_sum, w2 / w_sum, w3 / w_sum
+
+        denoised_combined = (w1 * denoised_results[0] +
+                             w2 * denoised_results[1] +
+                             w3 * denoised_results[2])
+    else:
+        # 简单平均
+        denoised_combined = sum(denoised_results) / len(denoised_results)
+
+    # 执行更新步骤
+    sigma_down, sigma_up = get_ancestral_step(sigma_i, sigma_next, eta=eta)
+    d = to_d(x, sigma_i, denoised_combined)
+    dt = sigma_down - sigma_i
+    x = x + d * dt
+
+    # 添加噪声
+    if sigma_next > 0:
+        x = x + noise_sampler(sigma_i, sigma_next) * s_noise * sigma_up
+
+    return x, denoised_combined
+
+
+def euler_ancestral_step(x, model, sigma_i, sigma_next, eta, extra_args,
+                         noise_sampler, s_noise):
+    """
+    标准的Euler Ancestral步骤
+    """
+    s_in = x.new_ones([x.shape[0]])
+    denoised = model(x, sigma_i * s_in, **extra_args)
+
+    sigma_down, sigma_up = get_ancestral_step(sigma_i, sigma_next, eta=eta)
+    d = to_d(x, sigma_i, denoised)
+    dt = sigma_down - sigma_i
+    x = x + d * dt
+
+    if sigma_next > 0:
+        x = x + noise_sampler(sigma_i, sigma_next) * s_noise * sigma_up
+
+    return x, denoised
