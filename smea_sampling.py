@@ -88,7 +88,8 @@ def append_dims(x, target_dims):
 
 def to_d(x, sigma, denoised):
     """Converts a denoiser output to a Karras ODE derivative."""
-    return (x - denoised) / append_dims(sigma, x.ndim).to(x.device)
+    eps = 1e-8
+    return (x - denoised) / append_dims(torch.clamp(sigma, min=eps), x.ndim).to(x.device)
 
 def default_mid_func(i, sigma_i, sigma_down, n_steps):
     progress = i / float(n_steps - 1) if (n_steps > 1) else 0
@@ -267,7 +268,7 @@ def smea_step(x, model, sigma_i, sigma_next, eta, extra_args,
     SMEA的核心多通道处理步骤
     """
     # 计算进度和正弦权重
-    progress = step / float(total_steps - 1)
+    progress = step / float(total_steps)
     sine_weight = math.sin(progress * math.pi * 0.5) ** 2
 
     # 多通道评估
