@@ -46,7 +46,7 @@ class _Rescaler:
             if self.latent_image is not None:
                 self.model.latent_image = torch.nn.functional.interpolate(input=self.latent_image, size=self.x.shape[2:4], mode=self.mode)
             if self.noise is not None:
-                self.model.noise = torch.nn.functional.interpolate(input=self.latent_image, size=self.x.shape[2:4], mode=self.mode)
+                self.model.noise = torch.nn.functional.interpolate(input=self.noise, size=self.x.shape[2:4], mode=self.mode)
             if self.denoise_mask is not None:
                 self.extra_args["denoise_mask"] = torch.nn.functional.interpolate(input=self.denoise_mask, size=self.x.shape[2:4], mode=self.mode)
 
@@ -58,7 +58,7 @@ class _Rescaler:
             self.model.init_latent, self.model.mask, self.model.nmask = self.init_latent, self.mask, self.nmask
         if BACKEND == "ComfyUI":
             del self.model.latent_image, self.model.noise
-            self.model.latent_image, self.model.noise = self.latent_image, self.noise
+            self.model.latent_image, self.model.noise,self.extra_args["denoise_mask"] = self.latent_image, self.noise, self.denoise_mask
 
 def default_noise_sampler(x):
     return lambda sigma, sigma_next: torch.randn_like(x)
@@ -133,84 +133,6 @@ def dy_sampling_step(x, model, dt, sigma_hat, **extra_args):
         x = x_expanded
 
     return x,denoised
-'''@torch.no_grad()
-def sample_euler_a_smea(
-    model,
-    x,
-    sigmas,
-    extra_args=None,
-    callback=None,
-    disable=False,
-    eta=1.,
-    s_noise=1.,
-    noise_sampler=None,
-    mid_func=None
-):
-    if extra_args is None:
-        extra_args = {}
-    if noise_sampler is None:
-        noise_sampler = default_noise_sampler(x)
-
-    s_in = x.new_ones([x.shape[0]],device=x.device)
-    n_steps = len(sigmas) - 1
-
-    print(extra_args,eta,s_noise)
-
-    if mid_func is None:
-        mid_func = default_mid_func
-
-    for i in trange(n_steps, disable=disable):
-        sigma_i = sigmas[i]
-        sigma_next = sigmas[i+1]
-
-        sigma_down, sigma_up = get_ancestral_step(sigma_i, sigma_next, eta=eta)
-
-        # 1) 计算中间sigma
-        sigma_mid = torch.tensor(mid_func(i, sigma_i, sigma_down, n_steps), dtype=x.dtype, device=x.device)
-        if sigma_down < sigma_i:
-            sigma_mid = torch.max(torch.min(sigma_mid, sigma_i), sigma_down).to(x.device)
-        else:
-            sigma_mid = torch.min(torch.max(sigma_mid, sigma_i), sigma_down).to(x.device)
-
-        # 子步 A: from sigma_i -> sigma_mid
-        factor = 1
-        if i<(n_steps-n_steps/10):
-            factor = math.sin((i/(n_steps-n_steps/10))*(math.pi/2)) * 0.6 + 0.5
-            print(factor)
-        x_s = F.interpolate(x, scale_factor=factor, mode='nearest').to(x.device)
-        denoised_a = model(x_s, sigma_i*s_in, **extra_args).to(x.device)  # U-Net预测
-        denoised_a = F.interpolate(denoised_a, size=x.shape[2:], mode='nearest').to(x.device)
-        d_a = to_d(x, sigma_i, denoised_a).to(x.device)
-        # 计算子步更新:
-        dt_a = sigma_mid - sigma_i
-        x = x + d_a * dt_a
-        #gamma = torch.min(sigma_mid, eta * (sigma_mid ** 2 * (sigma_i ** 2 - sigma_mid ** 2) / sigma_i ** 2) ** 0.5)
-        #x = x + noise_sampler(sigma_i,sigma_mid)*s_noise*gamma*((1.1-factor)/2)
-        # 子步 B: from sigma_mid -> sigma_down
-        dt_b = sigma_down - sigma_mid
-        if i<0:
-            x,denoised_b=dy_sampling_step(x,model,dt_b,sigma_mid,**extra_args)
-        else:
-            denoised_b = model(x, sigma_mid*s_in, **extra_args).to(x.device)
-            d_b = to_d(x, sigma_mid, denoised_b).to(x.device)
-            x = x + d_b * dt_b
-        print(sigma_i,sigma_mid,sigma_next)
-
-
-
-        #加 euler a 的祖先噪声
-        if sigma_next > 0:
-            x = x + noise_sampler(sigma_i, sigma_next)*s_noise*sigma_up
-        if callback is not None:
-            callback({
-                'x': x,
-                'i': i,
-                'sigma': sigmas[i],
-                'sigma_hat': sigmas[i],
-                'denoised': denoised_b
-            })
-
-    return x'''
 
 
 @torch.no_grad()
@@ -232,11 +154,11 @@ def sample_euler_a_smea(model, x, sigmas, extra_args=None, callback=None,
     for i in trange(n_steps, disable=disable):
         sigma_i = sigmas[i]
         sigma_next = sigmas[i + 1]
-
-        if enable_smea and i < n_steps * 0.8:  # 在前80%的步骤启用SMEA
+        apply_rate=0.6
+        if enable_smea and i < n_steps * apply_rate and i%2==0 :  # 在前50%的步骤启用SMEA
             # SMEA多通道处理
             x,denoised = smea_step(x, model, sigma_i, sigma_next, eta, extra_args,
-                          noise_sampler, s_noise, i, n_steps)
+                          noise_sampler, s_noise, i, n_steps*apply_rate)
         else:
             # 标准Euler Ancestral步骤
             x,denoised = euler_ancestral_step(x, model, sigma_i, sigma_next, eta,
@@ -256,7 +178,7 @@ def sample_euler_a_smea(model, x, sigmas, extra_args=None, callback=None,
 def create_detail_channel(x):
     """通过增强高频分量来创建细节通道"""
     # 使用高斯模糊获取低频分量
-    low_freq = gaussian_blur(x, kernel_size=[5,5])
+    low_freq = gaussian_blur(x, kernel_size=[3,3])
     # 计算高频细节
     high_freq = x - low_freq
     # 增强高频细节
@@ -270,11 +192,11 @@ def smea_step(x, model, sigma_i, sigma_next, eta, extra_args,
     # 计算进度和正弦权重
     progress = step / float(total_steps)
     sine_weight = math.sin(progress * math.pi * 0.5) ** 2
-
     # 多通道评估
     n_passes = 3
     denoised_results = []
-
+    print(sigma_i)
+    print(x.shape[2:])
     for pass_idx in range(n_passes):
         # 为每个通道准备不同的输入
         if pass_idx == 0:
@@ -283,36 +205,45 @@ def smea_step(x, model, sigma_i, sigma_next, eta, extra_args,
             scale_factor = 1.0
         elif pass_idx == 1:
             # 全局通道：降低分辨率以捕获全局特征
-            scale_factor = 0.5
-            x_input = F.interpolate(x, scale_factor=scale_factor,
-                                    mode='bilinear', align_corners=False)
+            scale_factor = 0.6
+            x_input = F.interpolate(x, size=[96,96],
+                                    mode='nearest')
+
         else:
             # 细节通道
             scale_factor = 1
             x_input = create_detail_channel(x)
-
-        # UNet评估
-        denoised = model(x_input, sigma_i * x_input.new_ones([x_input.shape[0]]),
-                         **extra_args)
+        if pass_idx == 1:
+            print(x_input.std())
+            print(sigma_i)
+            print(scale_factor)
+            with _Rescaler(model, x_input, 'nearest', **extra_args) as rescaler:
+                denoised = model(x_input,
+                                 (x_input.std()*(1-sine_weight)+sigma_i*sine_weight) * x_input.new_ones([x_input.shape[0]]),
+                             **rescaler.extra_args)
+        else:
+            # UNet评估
+            denoised = model(x_input, sigma_i * x_input.new_ones([x_input.shape[0]]),
+                            **extra_args)
 
         # 如果缩放了，恢复到原始尺寸
         if scale_factor != 1.0:
             denoised = F.interpolate(denoised, size=x.shape[2:],
-                                     mode='bilinear', align_corners=False)
+                                     mode='nearest')
 
         denoised_results.append(denoised)
 
     # 使用正弦权重组合多个结果
     if n_passes == 3:
         # 组合权重可以根据进度动态调整
-        w1 = 0.55 + 0.3 * sine_weight  # 主通道权重
-        w2 = 0.3 - 0.2 * sine_weight  # 全局通道权重
-        w3 = 0.15 - 0.1 * sine_weight  # 细节通道权重
-
+        w1 =  sine_weight  # 主通道权重
+        w2 = 1- sine_weight # 全局通道权重
+        w3 = 0.15-0.1*sine_weight  # 细节通道权重
+        print(sine_weight)
         # 归一化权重
         w_sum = w1 + w2 + w3
         w1, w2, w3 = w1 / w_sum, w2 / w_sum, w3 / w_sum
-
+        print(w1,w2,w3)
         denoised_combined = (w1 * denoised_results[0] +
                              w2 * denoised_results[1] +
                              w3 * denoised_results[2])
